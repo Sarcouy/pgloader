@@ -336,8 +336,10 @@
               ;; pre-existing indexes
               (not create-tables)))
 
-         (copy-kernel  (make-kernel worker-count))
-         (copy-channel (let ((lp:*kernel* copy-kernel)) (lp:make-channel)))
+         (select-kernel  (make-kernel worker-count))
+         (write-kernel  (make-kernel worker-count))
+         (select-channel (let ((lp:*kernel* select-kernel)) (lp:make-channel)))
+         (write-channel (let ((lp:*kernel* write-kernel)) (lp:make-channel)))
          (catalog      (handler-case
                            (fetch-metadata
                             copy
@@ -455,21 +457,23 @@
                          (copy-from table-source
                                     :concurrency concurrency
                                     :multiple-readers multiple-readers
-                                    :kernel copy-kernel
-                                    :channel copy-channel
+                                    :select-kernel select-kernel
+                                    :write-kernel write-kernel
+                                    :select-channel select-channel
+                                    :write-channel write-channel
                                     :on-error-stop on-error-stop
                                     :disable-triggers disable-triggers))))))
 
     ;; now end the kernels
     ;; and each time a table is done, launch its indexing
     (when copy-data
-      (let ((lp:*kernel* copy-kernel))
+      (let ((lp:*kernel* select-kernel))
         (with-stats-collection ("COPY Threads Completion" :section :post
                                                           :use-result-as-read t
                                                           :use-result-as-rows t)
           (loop :repeat task-count
              :do (destructuring-bind (task table seconds)
-                     (lp:receive-result copy-channel)
+                     (lp:receive-result write-channel)
                    (log-message :debug
                                 "Finished processing ~a for ~s ~50T~6$s"
                                 task (format-table-name table) seconds)

@@ -60,8 +60,10 @@
 
 (defmethod copy-from ((copy copy)
                       &key
-                        (kernel nil k-s-p)
-                        (channel nil c-s-p)
+                        (select-kernel nil k-s-p-select)
+                        (select-channel nil c-s-p-select)
+                        (write-kernel nil k-s-p-write)
+                        (write-channel nil c-s-p-write)
                         (worker-count 8)
                         (concurrency 2)
                         (multiple-readers nil)
@@ -69,14 +71,20 @@
                         disable-triggers)
   "Copy data from COPY source into PostgreSQL."
   (let* ((table-name   (format-table-name (target copy)))
-         (lp:*kernel*  (or kernel (make-kernel worker-count)))
-         (channel      (or channel (lp:make-channel)))
+         (lp:*kernel*  (or select-kernel (make-kernel worker-count)))
+         (lp:*kernel*  (or write-kernel (make-kernel worker-count)))
+         (select-channel      (or select-channel (lp:make-channel)))
+         (write-channel      (or write-channel (lp:make-channel)))
          (readers      nil)
-         (task-count   0))
+         (task-count-select 0)
+         (task-count-write 0))
 
-    (flet ((submit-task (channel function &rest args)
+    (flet ((submit-task-select (channel function &rest args)
              (apply #'lp:submit-task channel function args)
-             (incf task-count)))
+             (incf task-count-select)))
+    (flet ((submit-task-write (channel function &rest args)
+             (apply #'lp:submit-task channel function args)
+             (incf task-count-write)))
 
       (lp:task-handler-bind
           (#+pgloader-image
@@ -122,9 +130,9 @@
 
               (loop :for rawq :in rawqs :for reader :in readers :do
                  ;; each reader pretends to be alone, pass 1 as concurrency
-                 (submit-task channel #'queue-raw-data reader rawq 1)
+                 (submit-task select-channel #'queue-raw-data reader rawq 1)
 
-                 (submit-task channel #'copy-rows-from-queue
+                 (submit-task write-channel #'copy-rows-from-queue
                               copy rawq
                               :on-error-stop on-error-stop
                               :disable-triggers disable-triggers)))
@@ -134,23 +142,28 @@
             ;; writers.
             (let ((rawq
                    (lq:make-queue :fixed-capacity *prefetch-rows*)))
-              (submit-task channel #'queue-raw-data copy rawq concurrency)
+              (submit-task-select select-channel #'queue-raw-data copy rawq concurrency)
+
 
               ;; start a task to transform the raw data in the copy format
               ;; and send that data down to PostgreSQL
               (loop :repeat concurrency :do
-                 (submit-task channel #'copy-rows-from-queue
+                 (submit-task-write write-channel #'copy-rows-from-queue
                               copy rawq
                               :on-error-stop on-error-stop
                               :disable-triggers disable-triggers))))
 
-        ;; now wait until both the tasks are over, and kill the kernel
-        (unless c-s-p
-          (log-message :debug "waiting for ~d tasks" task-count)
-          (loop :repeat task-count :do (lp:receive-result channel))
-          (log-message :notice "COPY ~s done." table-name)
-          (unless k-s-p (lp:end-kernel :wait t)))
+        (unless c-s-p-select
+            (unless c-s-p-write
+                (log-message :debug "waiting for ~d tasks" task-count-select)
+                (log-message :debug "waiting for ~d tasks" task-count-write)
+                (loop :repeat task-count-select :do (lp:receive-result select-channel))
+                (loop :repeat task-count-write :do (lp:receive-result write-channel))
+                (log-message :notice "COPY ~s done." table-name)
+                (unless k-s-p-select
+                    (unless k-s-p-write
+                        (lp:end-kernel :wait t)))))
 
         ;; return task-count, which is how many tasks we submitted to our
         ;; lparallel kernel.
-        task-count))))
+        task-count-select + task-count-write)))))
