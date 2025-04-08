@@ -1,4 +1,6 @@
 ;;;; pgloader.asd
+(eval-when (:compile-toplevel :load-toplevel :execute)
+  (pushnew :lparallel.without-stealing-scheduler *features*))
 
 (asdf:defsystem #:pgloader
   :serial t
